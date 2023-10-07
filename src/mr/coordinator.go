@@ -125,30 +125,30 @@ func (c *Coordinator) ApplyForTask(req *ApplyTaskReq, resp *ApplyTaskResp) error
 				for i := 0; i < c.NReduce; i++ {
 					err := os.Rename(tmpMapOutFile(req.WorkerId, req.TaskId, i), finalMapOutFile(req.TaskId, i))
 					if err != nil {
+						fmt.Println(req)
 						log.Fatalf(
 							"Failed to mark map output file `%s` as final: %e",
 							tmpMapOutFile(req.WorkerId, req.TaskId, i), err)
 					}
 				}
 
+			} else if req.TaskType == Reduce {
+				err := os.Rename(
+					tmpReduceOutFile(req.WorkerId, req.TaskId),
+					finalReduceOutFile(req.TaskId))
+				if err != nil {
+					log.Fatalf(
+						"Failed to mark reduce output file `%s` as final: %e",
+						tmpReduceOutFile(req.WorkerId, req.TaskId), err)
+				}
 			}
-			// 如果上一个任务类型是 REDUCE，则将 Reduce 任务的输出文件重命名为最终的 Reduce 输出文件
-		} else if req.TaskType == Reduce {
-			err := os.Rename(
-				tmpReduceOutFile(req.WorkerId, req.TaskId),
-				finalReduceOutFile(req.TaskId))
-			if err != nil {
-				log.Fatalf(
-					"Failed to mark reduce output file `%s` as final: %e",
-					tmpReduceOutFile(req.WorkerId, req.TaskId), err)
+			// 删除任务映射表
+			delete(c.Tasks, taskId)
+			if len(c.Tasks) == 0 {
+				c.cutover()
 			}
+			c.Lock.Unlock()
 		}
-		// 删除任务映射表
-		delete(c.Tasks, taskId)
-		if len(c.Tasks) == 0 {
-			c.cutover()
-		}
-		c.Lock.Unlock()
 	}
 	task, ok := <-c.ToDoTasks
 	if !ok {

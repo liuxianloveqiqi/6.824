@@ -76,10 +76,13 @@ func Worker(mapf func(string, string) []KeyValue,
 			// 在switch里面跳出for，使用goto
 			goto END
 		case Map:
-			doMapTask(workId, taskId, resp.NReduce, resp.MapInputFile, mapf)
+			doMapTask(workId, resp.TaskId, resp.NReduce, resp.MapInputFile, mapf)
 		case Reduce:
-
+			doReducdTask(workId, resp.TaskId, resp.NMap, reducef)
 		}
+		taskId = resp.TaskId
+		taskType = resp.TaskType
+		log.Printf("完成 %s 任务 %d", resp.TaskType, resp.TaskId)
 	}
 END:
 	log.Printf("Worker %d 结束工作\n", workId)
@@ -159,7 +162,7 @@ func doReducdTask(workId int, taskId int, NMap int, reducef func(string, []strin
 	lines := make([]string, 0)
 	for i := 0; i < NMap; i++ {
 		// 从map临时文件中读取单词
-		content, err := os.ReadFile(finalMapOutFile(workId, taskId))
+		content, err := os.ReadFile(finalMapOutFile(i, taskId))
 		if err != nil {
 			log.Fatalf("读取finalMapOutFile错误")
 		}
