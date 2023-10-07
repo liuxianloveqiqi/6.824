@@ -188,7 +188,9 @@ func doReducdTask(workId int, taskId int, NMap int, reducef func(string, []strin
 	for i := 0; i < len(kvs); {
 		j := i + 1
 		// 将相同的单词添加到一个切片里面
-		for j < len(kvs) && kvs[i] == kvs[j] {
+
+		// TODO 这里有个大bug，没有比较Key
+		for j < len(kvs) && kvs[i].Key == kvs[j].Key {
 			j++
 		}
 

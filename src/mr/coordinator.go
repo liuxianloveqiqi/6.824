@@ -101,7 +101,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 				if task.WorkerId != -1 && time.Now().After(task.DeadLine) {
 					log.Printf(" Worker %d 运行任务 %s %d 出现故障，重新收回！", task.WorkerId, task.Type, task.Id)
 					// 重新分配任务
-					task.Id = -1
+					task.WorkerId = -1
 					c.ToDoTasks <- task
 				}
 			}
