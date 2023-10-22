@@ -90,6 +90,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		c.ToDoTasks <- task
 	}
 	c.server()
+
 	// 开启携程循环，回收超时任务
 	// 后台周期性地检查任务的截止时间
 	go func() {
