@@ -85,9 +85,10 @@ type Raft struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
-	// Your code here (2A).
+	rf.mu.Lock()
+	term := rf.currentTerm
+	isleader := rf.currentRole == ROLE_Leader
+	rf.mu.Unlock()
 	return term, isleader
 }
 
@@ -184,15 +185,17 @@ func getCurrentTime() int64 {
 // 切换 role
 func (rf *Raft) switchRole(role ServerRole) {
 	// 如果相同直接return
+
 	if rf.currentRole == role {
 		return
 	}
+	old := rf.currentRole
 	rf.currentRole = role
 	// 投票 重置为-1
 	if role == ROLE_Follwer {
 		rf.votedFor = -1
 	}
-	fmt.Printf("[SwitchRole] id=%d role=%d term=%d change to %d \n", rf.me, rf.currentRole, rf.currentTerm, role)
+	fmt.Printf("[SwitchRole] id=%d role=%d term=%d change to %d \n", rf.me, old, rf.currentTerm, role)
 }
 
 // example RequestVote RPC handler.
@@ -372,11 +375,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 // candidta发送给其他的follow去拉票
 func (rf *Raft) StartElection() {
-	rf.mu.Lock()
-	rf.votedFor = rf.me
-	rf.currentTerm++
+	// 重置票数和超时时间
+
+	rf.currentTerm += 1
 	rf.votedCnt = 1
-	rf.mu.Unlock()
+	rf.electionTimer.Reset(getRandomTimeout())
+	rf.votedFor = rf.me
+	rf.persist()
+
 	// 遍历每个节点
 	for server, _ := range rf.peers {
 		// 先跳过自己
@@ -416,7 +422,7 @@ func (rf *Raft) StartElection() {
 			rf.mu.Unlock()
 
 			// 票数过半，选举成功
-			if cnt*2 >= len(rf.peers) {
+			if cnt*2 > len(rf.peers) {
 				// 这里有可能处理 rpc 的时候，收到 rpc，变成了 follower，所以再校验一遍
 				rf.mu.Lock()
 				if rf.currentRole == ROLE_Candidate {
@@ -431,6 +437,18 @@ func (rf *Raft) StartElection() {
 			}
 		}(server)
 	}
+}
+func (rf *Raft) CheckHeartbeat() {
+	// 指定时间没有收到 Heartbeat
+	rf.mu.Lock()
+	if rf.heartbeatFlag != 1 {
+		// 开始新的 election, 切换状态
+		// [follwer -> candidate] 1. 心跳超时，进入 election
+		//fmt.Printf("[CheckHeartbeat] id=%d role=%d term=%d not recived heart beat ... \n", rf.me, rf.currentRole, rf.currentTerm)
+		rf.switchRole(ROLE_Candidate)
+	}
+	rf.heartbeatFlag = 0 // 每次重置 heartbeat 标记
+	rf.mu.Unlock()
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -461,6 +479,7 @@ func (rf *Raft) ticker() {
 			// follower开始投票
 			case ROLE_Follwer:
 				// follow转为 candidate参与选举
+
 				rf.switchRole(ROLE_Candidate)
 				rf.StartElection()
 				// candidate参与选举
