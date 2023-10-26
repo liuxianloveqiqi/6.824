@@ -248,33 +248,34 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.currentTerm > args.Term ||
+		(args.Term == rf.currentTerm && rf.votedFor != -1 && rf.votedFor != args.CandidateId) {
+		reply.VoteGranted = false
+		return
+	}
+	rf.electionTimer.Reset(getRandomTimeout())
 	// 		任期不对，先转化成follow
 	reply.Term = rf.currentTerm
-	rf.electionTimer.Reset(getRandomTimeout())
 	if rf.currentTerm < args.Term {
 		rf.switchRole(ROLE_Follwer)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 	}
-	switch rf.currentRole {
-	case ROLE_Follwer:
-		// 2B Leader restriction，拒绝比较旧的投票(优先看任期)
-		// 1. 任期号不同，则任期号大的比较新
-		// 2. 任期号相同，索引值大的（日志较长的）比较新
-		// 拿出最大的log
-		lastLog := rf.log[len(rf.log)]
-		if args.Term < lastLog.Term || (args.Term == lastLog.Term && args.LastLogIndex < lastLog.Index) {
-			reply.VoteGranted = false
-			return
-		}
-		// 先看这个follow有没有投票过
-		if rf.votedFor == -1 {
-			rf.votedFor = args.CandidateId
-			reply.VoteGranted = true
-		} else {
-			reply.VoteGranted = false
-		}
-	case ROLE_Candidate, ROLE_Leader:
+
+	// 2B Leader restriction，拒绝比较旧的投票(优先看任期)
+	// 1. 任期号不同，则任期号大的比较新
+	// 2. 任期号相同，索引值大的（日志较长的）比较新
+	// 拿出最大的log
+	lastLog := rf.log[len(rf.log)]
+	if args.LastLogTerm < lastLog.Term || (args.LastLogTerm == lastLog.Term && args.LastLogIndex < lastLog.Index) {
+		reply.VoteGranted = false
+		return
+	}
+	// 先看这个follow有没有投票过
+	if rf.votedFor == -1 {
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
+	} else {
 		reply.VoteGranted = false
 	}
 
@@ -337,7 +338,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// record in local log
 	index = len(rf.log) + 1
-	rf.log = make(map[int]LogEntry)
 	rf.log[index] = LogEntry{Term: term, Command: command, Index: index}
 	//rf.persist()
 	//DPrintf("[Start] %s Add Log Index=%d Term=%d Command=%v\n", rf.role_info(), rf.getLogLogicSize(), rf.log[index].Term, rf.log[index].Command)
@@ -377,6 +377,7 @@ func (rf *Raft) leaderHeartBeat() {
 			// 加一下锁
 			rf.mu.Lock()
 			args.Term = rf.currentTerm
+			args.LeaderCommit = rf.commitIndex
 			args.LeaderId = rf.me
 			// args的log index应该是这个server的nextlog index-1
 			args.PrevLogIndex = rf.nextIndex[s] - 1
@@ -423,6 +424,7 @@ func (rf *Raft) leaderHeartBeat() {
 					// 投票过半，commit成功
 					if matchCnt*2 > len(rf.matchIndex) {
 						// 向applyCh发送表示确实提交
+						rf.commitIndex = commitIdx
 						rf.applyCh <- ApplyMsg{
 							CommandValid:  true,
 							Command:       rf.log[commitIdx].Command,
@@ -450,68 +452,68 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 // 发送心跳对应三个角色的执行
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	/*
+		part 2A 处理心跳
+		0. 优先处理
+		如果 args.term > currentTerm ，则直接转为 follwer, 更新当前 currentTerm = args.term
+		1. candidate
+		无需处理
+		2. follwer
+		需要更新 election time out
+		3. leader
+		无需处理
+		part 2B 处理日志复制
+		1. [先检查之前的]先获取 local log[args.PrevLogIndex] 的 term , 检查是否与 args.PrevLogTerm 相同，不同表示有冲突，直接返回失败
+		2. [在检查当前的]遍历 args.Entries，检查 3 种情况
+			a. 当前是否已经有了该日志，如果有了该日志，且一致，检查下一个日志
+			b. 当前是否与该日志冲突，有冲突，则从冲突位置开始，删除 local log [conflict ~ end] 的 日志
+			c. 如果没有日志，则直接追加
+
+	*/
+	// 1. Prev Check
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// 先做处理，便于直接return
-	reply.Term = rf.currentTerm
-	rf.electionTimer.Reset(getRandomTimeout())
-	// 当前的任期比leader的都大
 	if rf.currentTerm > args.Term {
 		reply.Success = false
-		rf.heartbeatFlag = 1
 		return
 	}
 
-	// 0.优先处理curterm<args.term,直接转化为follow
 	if rf.currentTerm < args.Term {
 		rf.switchRole(ROLE_Follwer)
 		rf.currentTerm = args.Term
-		rf.heartbeatFlag = 1
-		// TODO 差异一 没有补 -1
-
-	} else
-	// candidate在相同任期收到，则转化为follow
-	if rf.currentRole == ROLE_Candidate && rf.currentTerm == args.Term {
-		rf.switchRole(ROLE_Follwer)
-		rf.currentTerm = args.Term
-		rf.heartbeatFlag = 1
-
-		// TODO 差异一 没有补 -1
-	} else if rf.currentRole == ROLE_Follwer {
-		// follow
-		rf.heartbeatFlag = 1
 	}
-
-	// 先获取 local log[args.PrevLogIndex] 的 term , 检查是否与 args.PrevLogTerm 相同，不同表示有冲突，直接返回失败
+	////fmt.Printf("[ReciveAppendEntires] %d electionTimer reset %v\n", rf.me, getCurrentTime())
+	rf.electionTimer.Reset(getRandomTimeout())
+	reply.Term = rf.currentTerm
+	// 1. [先检查之前的]先获取 local log[args.PrevLogIndex] 的 term , 检查是否与 args.PrevLogTerm 相同，不同表示有冲突，直接返回失败
+	/* 有 3 种可能：
+	a. 找不到 PrevLog ，直接返回失败
+	b. 找到 PrevLog, 但是冲突，直接返回失败
+	c. 找到 PrevLog，不冲突，进行下一步同步日志
+	*/
 	prevLog, found := rf.log[args.PrevLogIndex]
-	// 1.如果没找到prelogIndex或者args的任期不等于prelog的任期
-	if args.PrevLogIndex != 0 && (!found || args.PrevLogTerm != prevLog.Term) {
+	if args.PrevLogIndex != 0 && (!found || prevLog.Term != args.PrevLogTerm) {
 		reply.Success = false
 		return
 	}
-	// 2.同一任期，添加args的log
+
+	// 2. 如果检查通过了，说明 ： 之前的 Log 与 Leader 都是一致的（需要确保这个 Ffeature）, 接下来只要强制覆盖后续的 log 即可
 	for i := 0; i < len(args.Entries); i++ {
-		// 拿log的idx
-		idx := args.Entries[i].Index
-		// 逐个将新的日志条目复制到Follower的日志中，以确保日志的一致性
-		rf.log[idx] = args.Entries[i]
+		index := args.Entries[i].Index
+		rf.log[index] = args.Entries[i]
 	}
-	// 3.提交log
+
+	// 3. 持久化提交
 	if args.LeaderCommit > rf.commitIndex {
 		for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
 			rf.applyCh <- ApplyMsg{
-				CommandValid:  true,
-				Command:       rf.log[i].Command,
-				CommandIndex:  i,
-				SnapshotValid: false,
-				Snapshot:      nil,
-				SnapshotTerm:  0,
-				SnapshotIndex: 0,
+				CommandValid: true,
+				Command:      rf.log[i].Command,
+				CommandIndex: i,
 			}
 		}
 		rf.commitIndex = args.LeaderCommit
 	}
-	// leader不处理
 	reply.Success = true
 }
 
@@ -536,7 +538,7 @@ func (rf *Raft) StartElection() {
 			lastLog := rf.log[len(rf.log)]
 			args := RequestVoteArgs{
 				Term:         rf.currentTerm,
-				CandidateId:  s,
+				CandidateId:  rf.me,
 				LastLogTerm:  lastLog.Term,
 				LastLogIndex: lastLog.Index,
 			}
