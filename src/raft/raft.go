@@ -219,6 +219,7 @@ func (rf *Raft) switchRole(role ServerRole) {
 		// init leader data
 		rf.heartbeatTimer.Reset(100 * time.Millisecond)
 		for i := range rf.peers {
+			// 重置日志
 			rf.matchIndex[i] = 0
 			rf.nextIndex[i] = len(rf.log) + 1
 		}
@@ -452,68 +453,68 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 // 发送心跳对应三个角色的执行
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	/*
-		part 2A 处理心跳
-		0. 优先处理
-		如果 args.term > currentTerm ，则直接转为 follwer, 更新当前 currentTerm = args.term
-		1. candidate
-		无需处理
-		2. follwer
-		需要更新 election time out
-		3. leader
-		无需处理
-		part 2B 处理日志复制
-		1. [先检查之前的]先获取 local log[args.PrevLogIndex] 的 term , 检查是否与 args.PrevLogTerm 相同，不同表示有冲突，直接返回失败
-		2. [在检查当前的]遍历 args.Entries，检查 3 种情况
-			a. 当前是否已经有了该日志，如果有了该日志，且一致，检查下一个日志
-			b. 当前是否与该日志冲突，有冲突，则从冲突位置开始，删除 local log [conflict ~ end] 的 日志
-			c. 如果没有日志，则直接追加
-
-	*/
-	// 1. Prev Check
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	// 当前的任期比leader的都大
 	if rf.currentTerm > args.Term {
 		reply.Success = false
+		rf.heartbeatFlag = 1
 		return
 	}
 
+	// 0.优先处理curterm<args.term,直接转化为follow
 	if rf.currentTerm < args.Term {
 		rf.switchRole(ROLE_Follwer)
 		rf.currentTerm = args.Term
+		rf.heartbeatFlag = 1
+		// TODO 差异一 没有补 -1
+
 	}
-	////fmt.Printf("[ReciveAppendEntires] %d electionTimer reset %v\n", rf.me, getCurrentTime())
-	rf.electionTimer.Reset(getRandomTimeout())
+	// 先做处理，便于直接return
 	reply.Term = rf.currentTerm
-	// 1. [先检查之前的]先获取 local log[args.PrevLogIndex] 的 term , 检查是否与 args.PrevLogTerm 相同，不同表示有冲突，直接返回失败
-	/* 有 3 种可能：
-	a. 找不到 PrevLog ，直接返回失败
-	b. 找到 PrevLog, 但是冲突，直接返回失败
-	c. 找到 PrevLog，不冲突，进行下一步同步日志
-	*/
+	rf.electionTimer.Reset(getRandomTimeout())
+	// candidate在相同任期收到，则转化为follow
+	if rf.currentRole == ROLE_Candidate && rf.currentTerm == args.Term {
+		rf.switchRole(ROLE_Follwer)
+		rf.currentTerm = args.Term
+		rf.heartbeatFlag = 1
+
+		// TODO 差异一 没有补 -1
+	} else if rf.currentRole == ROLE_Follwer {
+		// follow
+		rf.heartbeatFlag = 1
+	}
+
+	// 先获取 local log[args.PrevLogIndex] 的 term , 检查是否与 args.PrevLogTerm 相同，不同表示有冲突，直接返回失败
 	prevLog, found := rf.log[args.PrevLogIndex]
-	if args.PrevLogIndex != 0 && (!found || prevLog.Term != args.PrevLogTerm) {
+	// 1.如果没找到prelogIndex或者args的任期不等于prelog的任期
+	if args.PrevLogIndex != 0 && (!found || args.PrevLogTerm != prevLog.Term) {
 		reply.Success = false
 		return
 	}
-
-	// 2. 如果检查通过了，说明 ： 之前的 Log 与 Leader 都是一致的（需要确保这个 Ffeature）, 接下来只要强制覆盖后续的 log 即可
+	// 2.同一任期，添加args的log
 	for i := 0; i < len(args.Entries); i++ {
-		index := args.Entries[i].Index
-		rf.log[index] = args.Entries[i]
+		// 拿log的idx
+		idx := args.Entries[i].Index
+		// 逐个将新的日志条目复制到Follower的日志中，以确保日志的一致性
+		rf.log[idx] = args.Entries[i]
 	}
-
-	// 3. 持久化提交
+	// 3.提交log
 	if args.LeaderCommit > rf.commitIndex {
 		for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
 			rf.applyCh <- ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[i].Command,
-				CommandIndex: i,
+				CommandValid:  true,
+				Command:       rf.log[i].Command,
+				CommandIndex:  i,
+				SnapshotValid: false,
+				Snapshot:      nil,
+				SnapshotTerm:  0,
+				SnapshotIndex: 0,
 			}
 		}
 		rf.commitIndex = args.LeaderCommit
 	}
+	// leader不处理
 	reply.Success = true
 }
 
