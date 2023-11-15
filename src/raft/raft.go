@@ -385,6 +385,10 @@ func (rf *Raft) leaderHeartBeat() {
 			reply := AppendEntriesReply{}
 			// 加一下锁
 			rf.mu.Lock()
+			if rf.currentRole != ROLE_Leader {
+				rf.mu.Unlock()
+				return
+			}
 			args.Term = rf.currentTerm
 			args.LeaderCommit = rf.commitIndex
 			args.LeaderId = rf.me
